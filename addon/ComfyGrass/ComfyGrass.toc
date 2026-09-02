@@ -1,0 +1,6 @@
+## Interface: 11200
+## Title: comfygrass
+## Notes: Adds a Foliage Density slider to the video options.
+## Author: comfy-wow
+
+ComfyGrass.lua
