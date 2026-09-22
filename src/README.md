@@ -26,7 +26,7 @@ Grass here is the "detail doodad" / "frill" system. The binary still describes i
 | CVar `frillDensity` (1–256), global `0x00C7B494` | the density dial |
 | setter `0x006725A0` → `0x006B1D20`, rebuild `0x006B1D30` | `N = min(frillDensity × 64, 8192)` |
 
-**This client renders through Direct3D 9, not D3D8.** `WoW.exe` imports `d3d9.dll` and calls `Direct3DCreate9`; the string `Direct3DCreate8` does not appear. `d3d9.dll` in the client root is DXVK.
+**This client renders through Direct3D 9, not D3D8.** `WoW.exe` contains the strings `d3d9.dll` and `Direct3DCreate9` and loads `d3d9.dll` at run time; it does not import it. The strings `Direct3DCreate8` and `d3d8.dll` do not appear. `d3d9.dll` in the client root is DXVK.
 
 ## How it works
 
@@ -127,13 +127,13 @@ Its view matrix has **no translation** (`view[3] = 0,0,0,1`). The camera positio
 
 Using that for the wave phase made every blade jump to a new point in the wave as the camera moved. So by default (`worldPhase = 0`), the phase and per-blade jitter come from chunk-local vertex positions, which are stable.
 
-The trade-off: the wind pattern repeats per chunk instead of running across the world, and adjacent chunks can show a phase seam. A `wavelength` above the chunk size (~33 yards) hides it. A proper fix needs the camera's true world position from the client; the D3D matrices do not contain it.
+The trade-off: the wind pattern repeats per chunk instead of running across the world, and adjacent chunks can show a phase seam. A `wavelength` above the chunk size (~33 yards) hides it. A proper fix adds the camera's world position to the phase. The D3D matrices do not contain it, but comfygrass already reads it from the client for parting (`0x00C7CF20`, above). The wave phase does not use it yet.
 
 ## Known gaps
 
 - **Lighting follows the fixed-function equation:** `emissive + ambientMat × (D3DRS_AMBIENT + Σ light.Ambient) + diffuseMat × sun × N·L`, with the material sources, `COLORVERTEX` and `LIGHTING` read live from the device. Only the first directional light adds diffuse; point and spot lights are ignored. An earlier version used `(ambient + sun × N·L) × vertexColour`, which dropped the lights' Ambient term and the material and made the grass darker than stock. The state is logged once as `grass lighting:`.
 - **Fog uses `pos.w`**; range fog would differ.
-- **Wind repeats per chunk** unless the camera position is read from the client (above).
-- **One device**, and hooks install on the first `CreateDevice`.
+- **Wind repeats per chunk.** comfygrass already reads the camera position for parting, but the wave phase does not use it yet (above).
+- **One device.** The hooks are in DXVK's shared device vtable, so every device goes through them, but comfygrass tracks the state of only one device.
 - **No distance attenuation.** The CPU path had a `distanceFade`. The shader does not, so the setting was removed from the ini.
 - The camera and object-manager addresses are for **this** `WoW.exe`. Another build moves them. The ini exposes all of them, and `playerPosOff = 0` runs the search for the last one again.
