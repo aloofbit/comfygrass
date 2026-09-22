@@ -53,9 +53,16 @@ namespace
     wchar_t g_iniPath[MAX_PATH] = {};
     wchar_t g_logPath[MAX_PATH] = {};
 
-    // The client calls Direct3DCreate9 from more than one thread during start-up. One lock covers both
-    // the log (which opens and closes the file per line, so concurrent writers silently lost lines and
-    // made the diagnostics lie) and hook installation (where a race chained hook->hook and recursed).
+    // One lock covers the log and hook installation.
+    //
+    // The log opens and closes the file for each line. It is written from DllMain, the attach thread and
+    // the client's render thread, and concurrent writers silently lost lines, which made the diagnostics
+    // lie.
+    //
+    // Hook installation runs only on the attach thread (PatchDevice, called once from AttachToDxvk). The
+    // lock stays so that a second caller cannot race it: two racing installs chain hook->hook, which
+    // recurses forever. That race was real in the old d3d9.dll proxy design, where the client called
+    // Direct3DCreate9 from more than one thread.
     CRITICAL_SECTION g_lock;
     bool             g_lockReady = false;
 
@@ -84,10 +91,9 @@ namespace
         fclose(f);
     }
 
-    // Installing a slot must never capture our own hook as "the original" -- that is an instant infinite
-    // recursion, and it is easy to hit because the client calls Direct3DCreate9 from more than one thread
-    // during start-up, so two racing installs would chain hook->hook. Hence both the identity check and
-    // the interlocked guard on the callers below.
+    // Installing a slot must never save our own hook as "the original": that is an infinite recursion.
+    // The identity check below prevents it if a slot is installed twice, and g_devHooked, checked under
+    // g_lock, makes PatchDevice install only once (see the note on g_lock).
     bool HookSlot(void** slot, void* hook, void** origOut)
     {
         if (*slot == hook)
@@ -154,8 +160,8 @@ namespace
     bool g_toggleKeyDown = false;
 
     // Direct read of a range. This is the ONLY place anything is read out of the client's buffer, and
-    // only ever for a small sample -- the probe capture, and each grass texture's uv span, measured once
-    // per texture. Reading this memory per frame is what sank three earlier designs (see README).
+    // only for a small sample: the probe capture, and each grass texture's uv span, measured once per
+    // texture. Reading this memory per frame sank three earlier designs (see README).
     bool VbRead(IDirect3DVertexBuffer9* vb, UINT offset, UINT size, uint8_t* out)
     {
         void* p = nullptr;
@@ -250,7 +256,7 @@ namespace
         return g_layouts.emplace(decl, L).first->second;
     }
 
-    // Logs each declaration once, so a probe capture shows where position and uv actually live.
+    // Logs each declaration once, so a probe capture shows where position and uv are.
     void LogDeclaration(IDirect3DVertexDeclaration9* decl)
     {
         static std::map<IDirect3DVertexDeclaration9*, bool> seen;
@@ -288,7 +294,7 @@ namespace
             if (!warned)
             {
                 warned = true;
-                Log("[match] is unconfigured -- effect stays inert. Capture a frame with the probe key first.");
+                Log("[match] is unconfigured, so the effect stays off. Capture a frame with the probe key first.");
             }
             return false;
         }
@@ -296,8 +302,8 @@ namespace
         if (m.fvf != 0xFFFFFFFF && g_state.fvf != m.fvf)        return false;
 
         // Grass is batched per map chunk, so its world matrix is a pure translation. Doodad instances
-        // (trees, bushes) share the vertex format but carry a real rotation -- without this the wind was
-        // bending trees too.
+        // (trees, bushes) share the vertex format but carry a real rotation. Without this test, the wind
+        // bent trees too.
         if (m.identityRotation)
         {
             const D3DMATRIX& w = g_state.world;
@@ -372,7 +378,7 @@ namespace
                 }
                 else
                 {
-                    Log("        rs %-16s = (never set -- default)", st.name);
+                    Log("        rs %-16s = (never set: default)", st.name);
                 }
             }
 
@@ -413,13 +419,6 @@ namespace
         }
     }
 
-    // Writes every known grass range in one buffer, under a single lock.
-    //
-    // The first cut locked and unlocked once per matched draw -- ~360 times a frame. Each lock on a
-    // static buffer makes DXVK wait for the GPU to finish with it, so that was ~360 pipeline stalls per
-    // frame and about one frame every two seconds. One lock spanning the grass ranges, with scattered
-    // writes inside it, does the same work without the stalls; bytes between the ranges belong to other
-    // geometry sharing the arena and are simply not touched.
     // The original device methods, saved by HookSlot. Declared here because the displacement
     // path below re-issues draws through them.
     using PresentFn      = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*);
@@ -448,8 +447,8 @@ namespace
     DrawIdxPrimFn  g_oDrawIdxPrim  = nullptr;
     CreateDeviceFn g_oCreateDevice = nullptr;
 
-    // Cost accounting, reported every few hundred frames so the CPU path can be judged on numbers
-    // rather than on how the game feels.
+    // Cost of the shader path, logged every reportEvery frames, so it is judged on numbers rather than
+    // on how the game feels.
     struct Cost
     {
         double   seconds = 0.0;
@@ -462,17 +461,16 @@ namespace
     // ---------------------------------------------------------------------------------------------
     // GPU path
     //
-    // Everything above this exists because the displacement was done on the CPU, which meant reading the
-    // client's vertex buffer back. That buffer is created write-only and maps to uncached memory: reads
-    // run at ~20 MB/s no matter how they are cached, batched or issued, which put a hard floor of ~60 ms
-    // a frame under every CPU design. Three of them died on it.
+    // The three CPU designs before this one read the client's vertex buffer back. That buffer is created
+    // write-only and maps to uncached memory: reads run at ~20 MB/s however they are cached, batched or
+    // issued, which put a floor of ~60 ms a frame under every CPU design.
     //
     // Here nothing is read. A vertex shader is bound for grass draws only, the client's own buffer is the
     // input, and the GPU does the displacement. D3D9 allows a programmable vertex shader alongside the
     // fixed-function pixel pipeline, so only vertex work has to be reproduced: transform, lighting, fog
     // and texcoords.
     //
-    // The bend weight is uv.y, which on correctly-identified grass runs 0 at the tip to 1 at the base --
+    // The bend weight is uv.y, which on correctly-identified grass runs 0 at the tip to 1 at the base,
     // the same signal wxl-grasswind uses on WotLK. (An earlier capture suggested otherwise, but it had
     // been measuring tree doodads, which share the vertex format.)
 
@@ -491,9 +489,7 @@ namespace
 
     // uv.y span per grass texture, measured once from a small sample.
     //
-    // This is the only place anything is read out of the client's buffer, and it happens a few dozen
-    // times per session rather than per frame -- so it costs nothing, unlike the per-frame readback that
-    // sank the CPU designs.
+    // This read happens a few dozen times per session, not per frame, so it costs nothing (see VbRead).
     struct VSpan { float lo; float inv; };
     std::map<void*, VSpan> g_vspan;
 
@@ -504,16 +500,15 @@ namespace
     // the player anchor
     //
     // Parting needs the player in the same space as the grass, and that space is camera-relative (see
-    // the note in DrawWithWindShader) -- so the quantity actually wanted is playerPos - cameraPos, not
-    // either one on its own. The client holds both: 0x00680BC0 in this WoW.exe takes a camera position
-    // and a look-at target, stores them to two float3 globals, then computes target - position to build
-    // the view direction.
+    // the note in DrawWithWindShader). So the value needed is playerPos - cameraPos, not either one on
+    // its own. 0x00680BC0 in this WoW.exe takes a camera position and a look-at target, stores them to
+    // two float3 globals, then computes target - position to build the view direction.
     //
-    // The target is the point the camera orbits, and that point stays anchored on the player at every
-    // zoom level -- at zero distance the two coincide -- so it stands in for the player without walking
-    // the object manager. Both addresses came out of disassembling this exact binary, not a published
-    // offset list: the camera pointer those lists give for 1.12.1 is not referenced anywhere in this
-    // build, even though the object-manager global they list (0x00B41414) is exactly where they say.
+    // The target is one yard out along the view axis, so target - camera is the forward vector, not the
+    // player. The player position comes from the object manager (below). Both camera addresses came out
+    // of disassembling this binary, not a published offset list: the camera pointer those lists give for
+    // 1.12.1 is not referenced anywhere in this build, although their object-manager global
+    // (0x00B41414) is where they say.
 
     struct PlayerAnchor
     {
@@ -553,7 +548,7 @@ namespace
     // These offsets are from the disassembly, not from a published list: the manager global at
     // 0x00B41414 (the list's own accessors sit right below it), its object list head at +0xAC, the
     // link offset at +0xA4 so that next = *(obj + link + 4), each object's GUID at +0x30, and the
-    // active player's GUID at +0xC0 -- which is precisely what the function at 0x00468550 returns.
+    // active player's GUID at +0xC0, which is what the function at 0x00468550 returns.
     // A list pointer with its low bit set is the terminator, the same test the client's own loops use.
 
     bool SafeCopy(uintptr_t src, void* dst, size_t n)
@@ -605,9 +600,9 @@ namespace
 
     // Where the position sits inside the object is the one thing the disassembly did not hand over, so
     // it is found from geometry instead. Whatever the zoom or the pitch, a camera that orbits the
-    // player leaves the player in the vertical plane through the camera's forward vector -- so
-    // (player - camera).xy runs parallel to forward.xy. Pitch only moves things in Z, which is why the
-    // test ignores Z entirely and stays exact at every camera angle.
+    // player leaves the player in the vertical plane through the camera's forward vector, so
+    // (player - camera).xy runs parallel to forward.xy. Pitch only moves things in Z, so the test
+    // ignores Z and stays exact at every camera angle.
     //
     // Almost nothing else in the object passes that while you walk and turn, and the search keeps only
     // offsets that pass on every frame of the window, so a coincidence has to hold for ~90 frames.
@@ -712,7 +707,7 @@ namespace
             const HMODULE exe = GetModuleHandleW(nullptr);
             g_imageSlide   = reinterpret_cast<intptr_t>(exe) - static_cast<intptr_t>(0x00400000);
             g_anchorUsable = AnchorPtr(p.camAddr) != nullptr && AnchorPtr(p.anchorAddr) != nullptr;
-            Log("player anchor: image at %p (slide %+d), camera 0x%08X, anchor 0x%08X -- %s",
+            Log("player anchor: image at %p (slide %+d), camera 0x%08X, anchor 0x%08X: %s",
                 exe, static_cast<int>(g_imageSlide), p.camAddr, p.anchorAddr,
                 g_anchorUsable ? "readable" : "NOT readable, parting stays off");
         }
@@ -729,8 +724,8 @@ namespace
 
         // Sanity, every frame rather than once: world coordinates run to about +-17066 yards, and no
         // zoom puts the camera anywhere near 100 yards from its own aim point. A loading screen, a
-        // character-select screen or a mismatched build fails one of these, and parting just sits the
-        // frame out rather than flinging blades at a garbage coordinate.
+        // character-select screen or a mismatched build fails one of these, and parting skips the frame
+        // rather than flinging blades at a garbage coordinate.
         if (c[0] == 0.0f && c[1] == 0.0f && c[2] == 0.0f)
             return;
         for (int i = 0; i < 3; ++i)
@@ -787,8 +782,8 @@ namespace
 
     // Proves or disproves the camera address without needing anything to look right on screen.
     //
-    // If 0x00C7CF20 really is the camera, then (grass world translation + camera) is that chunk's true
-    // world origin -- and map chunks sit on a 100/3 yard grid. So the residual below has to be the same
+    // If 0x00C7CF20 is the camera, then (grass world translation + camera) is that chunk's true world
+    // origin, and map chunks sit on a 100/3 yard grid. So the residual below has to be the same
     // small number every frame, from any chunk, wherever you stand. If the address were wrong it would
     // wander with the camera instead.
     void ReportAnchor()
@@ -853,17 +848,17 @@ VsOut main(VsIn i)
     VsOut o;
     float3 p = i.pos;
 
-    // uv.y runs from the tip to the base, but only across a slice of the atlas -- one blade might span
-    // 0.00 to 0.09, not 0 to 1. Normalising against that measured span is what makes the blade hinge at
-    // the root instead of swaying bodily. anchor then holds the lowest part still, and squaring gives a
+    // uv.y runs from the tip to the base, but only across a slice of the atlas: one blade might span
+    // 0.00 to 0.09, not 0 to 1. Normalising against that measured span makes the blade hinge at the root
+    // instead of swaying bodily. anchor then holds the lowest part still, and squaring gives a
     // stiff base with a loose tip.
     float base = saturate((i.uv.y - gVS.x) * gVS.y);
     float tip  = 1.0 - base;
     float w   = saturate((tip - gSh.x) * gSh.y);
     w = w * w;
 
-    // Phase is evaluated in world space so the pattern stays put as the camera moves. The world matrix
-    // for grass is a pure translation, so adding the chunk origin is enough.
+    // Phase comes from the chunk-local position plus gWT, which is zero unless worldPhase is on (see
+    // DrawWithWindShader). Chunk-local positions do not move with the camera, so the pattern stays put.
     float2 wxy    = p.xy + gWT.xy;
     float  jit    = frac(wxy.x * 0.737 + wxy.y * 1.311);
     float  varMul = (1.0 - gPh.w * 0.5) + gPh.w * jit;
@@ -876,10 +871,10 @@ VsOut main(VsIn i)
     off *= w * varMul * gSh.z;
 
     // Parting: blades lean away from the player. gPC arrives already expressed in this vertex's own
-    // chunk-local space, so the whole thing is one subtraction here -- no world transform, and the
-    // per-draw cost stays a couple of constants. The same weight w that hinges the wind hinges this,
-    // which is what keeps the roots planted while the tips open up; the Z term is only there to stop
-    // grass on a ledge above or below the player from reacting to someone it is nowhere near.
+    // chunk-local space, so this is one subtraction, with no world transform, and the per-draw cost
+    // stays a couple of constants. The same weight w that hinges the wind hinges this, so the roots stay
+    // planted while the tips open up. The Z term only stops grass on a ledge above or below the player
+    // from reacting.
     float3 dp    = i.pos - gPC.xyz;
     float  dd    = dot(dp.xy, dp.xy) + 1e-4;
     float  dinv  = rsqrt(dd);
@@ -893,11 +888,11 @@ VsOut main(VsIn i)
     float4 wp = float4(p, 1.0);
     o.pos = float4(dot(wp, c0), dot(wp, c1), dot(wp, c2), dot(wp, c3));
 
-    // The fixed-function lighting equation, with the material sources the client actually set:
+    // The fixed-function lighting equation, with the material sources the client set:
     //     emissive + ambientMat * globalAmbient + diffuseMat * lightDiffuse * N.L
     // An earlier version multiplied (ambient + light) by the vertex colour instead. That drops the
-    // lights' own Ambient term and the material, and darkens grass the client draws unlit -- the
-    // grass came out visibly darker than stock.
+    // lights' own Ambient term and the material, and darkens grass the client draws unlit. The grass
+    // came out visibly darker than stock.
     float3 N   = normalize(i.nrm);
     float  ndl = saturate(dot(N, -gLD.xyz)) * gLD.w;
     float4 ambM = lerp(gMA, i.col, gMS.x);
@@ -916,7 +911,7 @@ VsOut main(VsIn i)
                                             LPCSTR, UINT, UINT, OgBlob**, OgBlob**);
 
     // Builds the shader once. vs_2_0 is compiled at run time from HLSL via d3dcompiler_47, which ships
-    // with Windows -- no D3DX dependency and no bytecode to hand-assemble.
+    // with Windows. There is no D3DX dependency and no bytecode to hand-assemble.
     bool EnsureWindShader(IDirect3DDevice9* dev)
     {
         if (g_windVS)
@@ -1018,7 +1013,7 @@ VsOut main(VsIn i)
 
         // The client renders camera-relative: its view matrix has no translation, so each draw's world
         // matrix is (chunkOrigin - cameraPos) and therefore moves whenever the camera does. Feeding that
-        // into the wave phase made every blade slide to a new point in the wave as you walked -- the
+        // into the wave phase made every blade slide to a new point in the wave as you walked, so the
         // blades appeared to jump between states.
         //
         // Vertex positions are chunk-local and stable, so by default the phase and the per-blade jitter
@@ -1221,15 +1216,14 @@ VsOut main(VsIn i)
     // Slots are patched *in place* rather than by copying the vtable and repointing lpVtbl. A copy looks
     // tidier but breaks DXVK: its interfaces are C++ objects whose RTTI word sits immediately before
     // vtable[0], so a copy that starts at vtable[0] loses it, and the client quietly gave up before ever
-    // reaching CreateDevice. Patching in place also means every object of the class is hooked at once,
-    // which is what we want -- the client creates a fresh IDirect3D9 several times and only one of them
-    // goes on to make the device.
+    // reaching CreateDevice. Patching in place also hooks every object of the class at once, so the
+    // client's device is caught whenever it is created, including before comfygrass loaded.
     //
     // Slot addresses come from the named CINTERFACE struct fields, so there are no magic indices.
 
 
 
-    LONG     g_devHooked  = 0;   // interlocked: only one thread may install
+    LONG     g_devHooked  = 0;   // set under g_lock: the vtable is patched only once
 
     void PollKeys()
     {
@@ -1411,15 +1405,14 @@ VsOut main(VsIn i)
     // ---------------------------------------------------------------------------------------------
     // attaching to DXVK
     //
-    // comfygrass is loaded by VanillaFixes from dlls.txt, like the client's other mods, rather than
-    // masquerading as d3d9.dll. That means there is no create call of ours to intercept -- and there is
-    // nothing useful to intercept anyway, because this WoW.exe does not import d3d9 at all. Its D3D9
-    // path was patched in, so it neither statically imports Direct3DCreate9 nor even GetProcAddress;
-    // hooking the client's import table would find nothing to hook.
+    // comfygrass is loaded by VanillaFixes from dlls.txt, like the client's other mods, not as
+    // d3d9.dll. So there is no create call of ours to intercept, and nothing in the client either: this
+    // WoW.exe does not import d3d9. Its D3D9 path was patched in, and it imports neither
+    // Direct3DCreate9 nor GetProcAddress, so the client's import table has nothing to hook.
     //
     // So the vtable is taken from a device of our own instead. Every IDirect3DDevice9 that DXVK hands
     // out shares one class vtable, so patching a slot in that vtable catches the client's device
-    // whatever order things happen in -- including a device it created before we loaded. The throwaway
+    // whatever order things happen in, including a device it created before we loaded. The throwaway
     // device exists only to name the vtable and is released immediately.
     //
     // In place matters: handing back a copied vtable drops the RTTI word DXVK keeps behind vtable[0],
@@ -1542,7 +1535,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID)
         }
         else
         {
-            Log("hook = 0, so nothing is patched -- comfygrass is inert this run");
+            Log("hook = 0, so nothing is patched: comfygrass is inert this run");
         }
     }
     return TRUE;

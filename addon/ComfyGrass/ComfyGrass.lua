@@ -2,15 +2,15 @@
 --
 -- This client's options panel is data-driven: GameOptions is a plain global table and OptionsFrame.lua
 -- builds the panel by walking it (see Interface\FrameXML\Options\Options.lua inside patch-9.mpq). So a
--- new slider is one table entry -- no FrameXML edits, no repacked MPQ, and the sliders already there are
--- not touched.
+-- new slider is one table entry. There are no FrameXML edits and no repacked MPQ, and the sliders already
+-- there are not touched.
 --
 -- Why this is not in comfygrass.ini: frillDensity is the CLIENT's setting, not ours. The grass is there
 -- whether or not comfygrass is loaded; we only make it move. It belongs in the game's own options, next
 -- to the other detail sliders, and it keeps working if you remove the DLL.
 --
 -- None of the six stock sliders touches it. Environment Detail is the natural guess and it is smallCull,
--- which culls small objects by distance -- nothing to do with how much grass is planted.
+-- which culls small objects by distance. It does not change how much grass is planted.
 
 COMFYGRASS_FOLIAGE_DENSITY = "Foliage Density";
 
@@ -36,7 +36,7 @@ local function AddFoliageSlider()
 
 	for _, category in ipairs(GameOptions) do
 		if category.name == WORLD_APPEARANCE and category.options then
-			-- Sit with the other detail sliders, just after Environment Detail; fall back to the end if
+			-- Sit with the other detail sliders, directly after Environment Detail; fall back to the end if
 			-- that one ever moves or goes away.
 			local at = table.getn(category.options) + 1;
 
@@ -59,13 +59,13 @@ end
 
 -- VARIABLES_LOADED is late enough that FrameXML's globals and GameOptions exist, and early enough that
 -- the options panel has not been opened yet. The panel rebuilds itself from the table every time it is
--- shown anyway, so inserting later would still take -- this is just the tidy moment.
+-- shown anyway, so inserting later would also work. This is the tidy moment.
 local frame = CreateFrame("Frame");
 frame:RegisterEvent("VARIABLES_LOADED");
 frame:SetScript("OnEvent", function()
 	if not AddFoliageSlider() then
 		-- Quietly doing nothing is the right failure here: a client whose options panel is built some
-		-- other way is not broken, it just has no table for us to add to.
+		-- other way is not broken. It has no table for us to add to.
 		DEFAULT_CHAT_FRAME:AddMessage(
 			"|cff88cc88comfygrass|r: this client's options panel is not the data-driven one, "
 			.. "so no Foliage Density slider was added. Use |cffffff78/console frilldensity 32|r instead.");
