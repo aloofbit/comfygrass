@@ -110,6 +110,10 @@ CMake writes the file `comfygrass.dll` to this folder, with the file `comfygrass
 
 The file [`src/README.md`](src/README.md) gives the technical data. It tells you how comfygrass finds the grass. It also gives the addresses that comfygrass reads from the `WoW.exe` file, and the test for each address. It tells you which three designs did not operate correctly.
 
+## Licence
+
+comfygrass uses the GPL-3.0 licence. Refer to the file [LICENSE](LICENSE).
+
 ---
 
 This document uses ASD-STE100 Simplified Technical English.
