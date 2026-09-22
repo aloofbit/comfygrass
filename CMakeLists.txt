@@ -18,7 +18,7 @@ add_library(comfygrass SHARED
 )
 
 # comfygrass.dll, loaded by VanillaFixes from dlls.txt. It exports nothing: it attaches by patching
-# DXVK's device vtable from DllMain, so there is no .def and nothing for the client to import.
+# DXVK's device vtable from a thread started in DllMain, so there is no .def and nothing for the client to import.
 #
 # The DLL lands in the project root rather than build/Release, so it sits next to comfygrass.ini and the
 # two files a player has to copy are always together. The empty $<0:> generator expression is what stops

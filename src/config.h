@@ -1,4 +1,4 @@
-// comfygrass.ini -- the tunable rows, plus the draw-call signature that says which draws are grass.
+// comfygrass.ini: the tunable rows, plus the draw-call signature that says which draws are grass.
 //
 // The wind/physics rows mirror wxl-grasswind's WindSettings/PhysicsSettings so the two can be compared
 // directly; the [match] row has no counterpart there, because on WotLK the grass shader identifies
@@ -30,9 +30,9 @@ struct PhysicsSettings
     float forceEdge   = 0.0f;  // lean strength at the radius edge
 
     // The object-manager position is the unit origin, i.e. the feet, so centerZ is normally 0 and
-    // exists only to nudge the anchor if a blade's own base sits oddly. The Z gate is just there to
-    // stop grass on a ledge overhead or below from reacting to someone it is nowhere near, so it is
-    // deliberately loose and symmetric rather than wxl's ground-up cone.
+    // exists only to nudge the anchor if a blade's own base sits oddly. The Z gate only stops grass on
+    // a ledge overhead or below from reacting, so it is loose and symmetric rather than wxl's ground-up
+    // cone.
     float centerZ     = 0.0f;  // shift the anchor along Z from the player's feet, yards
     float zRange      = 4.0f;  // no parting past this |Z| gap between blade and anchor, yards
     float zFade       = 2.0f;  // width of the fade band at that limit, yards
@@ -72,7 +72,7 @@ struct Settings
     PhysicsSettings physics;
     MatchSettings   match;
 
-    bool  effectEnabled = false; // off until a signature is configured -- see README
+    bool  effectEnabled = false; // off until a signature is configured (see README)
     bool  logEnabled    = true;
     bool  hook          = true;  // set 0 for a pure pass-through proxy (bisecting)
     int   probeKey      = VK_F9; // dump one frame of draw calls
