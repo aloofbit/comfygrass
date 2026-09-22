@@ -836,13 +836,17 @@ float4 gPh : register(c6);  // phase1, phase2, lean, variance
 float4 gSh : register(c7);  // anchor, 1/(1-anchor), scale, unused
 float4 gWT : register(c8);  // world translation (the chunk origin)
 float4 gFg : register(c9);  // fogStart, fogEnd, 1/(end-start), fogEnable
-float4 gAm : register(c10); // ambient rgb
+float4 gAm : register(c10); // global ambient rgb: D3DRS_AMBIENT plus every enabled light's Ambient
 float4 gLD : register(c11); // light direction xyz, enabled
-float4 gLC : register(c12); // light colour rgb
+float4 gLC : register(c12); // light diffuse colour rgb
 float4 gVS : register(c13); // uv.y at the blade tip, 1/(base-tip)
 float4 gPC : register(c14); // parting anchor in chunk-local space (xyz), parting enabled (w)
 float4 gPR : register(c15); // 1/radius, force at the anchor, force at the edge, 1/zFade
 float4 gPM : register(c16); // radius, zRange, unused, unused
+float4 gMD : register(c17); // material diffuse
+float4 gMA : register(c18); // material ambient
+float4 gME : register(c19); // material emissive
+float4 gMS : register(c20); // ambient/diffuse/emissive taken from the vertex colour (1) or material (0), lighting on
 
 VsOut main(VsIn i)
 {
@@ -889,11 +893,18 @@ VsOut main(VsIn i)
     float4 wp = float4(p, 1.0);
     o.pos = float4(dot(wp, c0), dot(wp, c1), dot(wp, c2), dot(wp, c3));
 
-    // Fixed-function equivalent: ambient plus one directional light, modulating the vertex colour.
+    // The fixed-function lighting equation, with the material sources the client actually set:
+    //     emissive + ambientMat * globalAmbient + diffuseMat * lightDiffuse * N.L
+    // An earlier version multiplied (ambient + light) by the vertex colour instead. That drops the
+    // lights' own Ambient term and the material, and darkens grass the client draws unlit -- the
+    // grass came out visibly darker than stock.
     float3 N   = normalize(i.nrm);
     float  ndl = saturate(dot(N, -gLD.xyz)) * gLD.w;
-    float3 lit = saturate(gAm.rgb + gLC.rgb * ndl);
-    o.col = float4(lit * i.col.rgb, i.col.a);
+    float4 ambM = lerp(gMA, i.col, gMS.x);
+    float4 difM = lerp(gMD, i.col, gMS.y);
+    float4 emiM = lerp(gME, i.col, gMS.z);
+    float3 lit  = saturate(emiM.rgb + ambM.rgb * gAm.rgb + difM.rgb * gLC.rgb * ndl);
+    o.col = lerp(i.col, float4(lit, difM.a), gMS.w);
 
     o.uv  = i.uv;
     o.fog = lerp(1.0, saturate((gFg.y - o.pos.w) * gFg.z), gFg.w);
@@ -993,7 +1004,7 @@ VsOut main(VsIn i)
 
         // Upload the transpose, so each register holds a column and o.pos = dot(v, c[n]) is the
         // row-vector multiply D3D9 uses.
-        float c[17][4] = {};
+        float c[21][4] = {};
         for (int r = 0; r < 4; ++r)
             for (int k = 0; k < 4; ++k)
                 c[r][k] = wvp.m[k][r];
@@ -1036,16 +1047,43 @@ VsOut main(VsIn i)
         c[9][0] = fogStart; c[9][1] = fogEnd; c[9][2] = 1.0f / span;
         c[9][3] = fogEnable ? 1.0f : 0.0f;
 
-        // Ambient, and the first enabled directional light, read from the device.
-        DWORD amb = 0;
+        // Lighting, read live from the device rather than from the g_rs mirror: the client may have set
+        // these before our hooks went in, and a stale default here is exactly what made the grass dark.
+        // D3D9's own defaults stand in if a read fails.
+        auto rs = [dev](D3DRENDERSTATETYPE st, DWORD def) {
+            DWORD v = def;
+            return SUCCEEDED(dev->lpVtbl->GetRenderState(dev, st, &v)) ? v : def;
+        };
+        const DWORD lighting    = rs(D3DRS_LIGHTING,              TRUE);
+        const DWORD colorVertex = rs(D3DRS_COLORVERTEX,           TRUE);
+        const DWORD ambSrc      = rs(D3DRS_AMBIENTMATERIALSOURCE, D3DMCS_MATERIAL);
+        const DWORD difSrc      = rs(D3DRS_DIFFUSEMATERIALSOURCE, D3DMCS_COLOR1);
+        const DWORD emiSrc      = rs(D3DRS_EMISSIVEMATERIALSOURCE, D3DMCS_MATERIAL);
+        const DWORD amb         = rs(D3DRS_AMBIENT,               0);
+
+        // The grass vertex has a diffuse colour but no specular, so only COLOR1 reads the vertex;
+        // D3D falls back to the material for COLOR2, and for everything when COLORVERTEX is off.
+        auto fromVertex = [colorVertex](DWORD src) { return (colorVertex && src == D3DMCS_COLOR1) ? 1.0f : 0.0f; };
+
+        D3DMATERIAL9 mat = {};
+        dev->lpVtbl->GetMaterial(dev, &mat);
+        const D3DCOLORVALUE* mats[3] = { &mat.Diffuse, &mat.Ambient, &mat.Emissive };
+        for (int m = 0; m < 3; ++m)
         {
-            auto it = g_rs.find(D3DRS_AMBIENT);
-            if (it != g_rs.end()) amb = it->second;
+            c[17 + m][0] = mats[m]->r; c[17 + m][1] = mats[m]->g;
+            c[17 + m][2] = mats[m]->b; c[17 + m][3] = mats[m]->a;
         }
+        c[20][0] = fromVertex(ambSrc);
+        c[20][1] = fromVertex(difSrc);
+        c[20][2] = fromVertex(emiSrc);
+        c[20][3] = lighting ? 1.0f : 0.0f;
+
         c[10][0] = ((amb >> 16) & 0xFF) / 255.0f;
         c[10][1] = ((amb >>  8) & 0xFF) / 255.0f;
         c[10][2] = ((amb      ) & 0xFF) / 255.0f;
 
+        // Every enabled light contributes its Ambient to the global ambient; the first directional
+        // one also supplies the diffuse term.
         c[11][3] = 0.0f;
         for (DWORD li = 0; li < 8; ++li)
         {
@@ -1053,15 +1091,32 @@ VsOut main(VsIn i)
             if (FAILED(dev->lpVtbl->GetLightEnable(dev, li, &on)) || !on)
                 continue;
             D3DLIGHT9 L = {};
-            if (FAILED(dev->lpVtbl->GetLight(dev, li, &L)) || L.Type != D3DLIGHT_DIRECTIONAL)
+            if (FAILED(dev->lpVtbl->GetLight(dev, li, &L)))
                 continue;
 
+            c[10][0] += L.Ambient.r; c[10][1] += L.Ambient.g; c[10][2] += L.Ambient.b;
+
+            if (L.Type != D3DLIGHT_DIRECTIONAL || c[11][3] != 0.0f)
+                continue;
             float dx = L.Direction.x, dy = L.Direction.y, dz = L.Direction.z;
             const float len = sqrtf(dx * dx + dy * dy + dz * dz);
             if (len > 1e-4f) { dx /= len; dy /= len; dz /= len; }
             c[11][0] = dx; c[11][1] = dy; c[11][2] = dz; c[11][3] = 1.0f;
             c[12][0] = L.Diffuse.r; c[12][1] = L.Diffuse.g; c[12][2] = L.Diffuse.b;
-            break;
+        }
+
+        // Once per session, so a colour mismatch can be traced to the state that caused it.
+        static bool litLogged = false;
+        if (!litLogged)
+        {
+            litLogged = true;
+            Log("grass lighting: LIGHTING=%u COLORVERTEX=%u src amb/dif/emi=%u/%u/%u ambient=0x%08X "
+                "globalAmb=(%.2f %.2f %.2f) sun=(%.2f %.2f %.2f) on=%.0f "
+                "mat dif=(%.2f %.2f %.2f) amb=(%.2f %.2f %.2f) emi=(%.2f %.2f %.2f)",
+                lighting, colorVertex, ambSrc, difSrc, emiSrc, amb,
+                c[10][0], c[10][1], c[10][2], c[12][0], c[12][1], c[12][2], c[11][3],
+                mat.Diffuse.r, mat.Diffuse.g, mat.Diffuse.b, mat.Ambient.r, mat.Ambient.g, mat.Ambient.b,
+                mat.Emissive.r, mat.Emissive.g, mat.Emissive.b);
         }
 
         // Blade uv.y span for this grass texture, sampled once.
@@ -1124,7 +1179,7 @@ VsOut main(VsIn i)
         g_state.lastGrassWorld[2] = g_state.world.m[3][2];
         g_state.lastGrassValid    = true;
 
-        if (FAILED(dev->lpVtbl->SetVertexShaderConstantF(dev, 0, &c[0][0], 17)))
+        if (FAILED(dev->lpVtbl->SetVertexShaderConstantF(dev, 0, &c[0][0], 21)))
             return false;
         if (FAILED(dev->lpVtbl->SetVertexShader(dev, g_windVS)))
             return false;

@@ -125,7 +125,7 @@ The trade-off is that the wind pattern repeats per chunk rather than running con
 
 ## Known gaps
 
-- **Lighting is approximate** — ambient plus the first enabled directional light, modulating vertex colour. Matches the stock look in practice, but is not a full fixed-function reimplementation.
+- **Lighting follows the fixed-function equation** — `emissive + ambientMat × (D3DRS_AMBIENT + Σ light.Ambient) + diffuseMat × sun × N·L`, with the material sources, `COLORVERTEX` and `LIGHTING` read live from the device. Only the first directional light contributes diffuse; point and spot lights are ignored. An earlier version used `(ambient + sun × N·L) × vertexColour`. It dropped the lights' Ambient term and the material, and the grass came out visibly darker than stock. The state it sees is logged once as `grass lighting:`.
 - **Fog uses `pos.w`**; range fog would differ.
 - **Wind repeats per chunk** unless the camera position is read from the client (above).
 - **One device**, and hooks install on the first `CreateDevice`.
