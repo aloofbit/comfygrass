@@ -1,18 +1,18 @@
-// comfygrass -- moving grass for the 1.12 client.
+// comfygrass: moving grass for the 1.12 client.
 //
 // Why this looks nothing like wxl-grasswind: on WotLK the detail doodads have their own vertex shader,
 // so that module disassembles the stock shader, splices a wind block into it and reassembles. The 1.12
-// client ships exactly five vertex shaders (patter, rain, sand, snowpoint, Model2) and none of them is
-// grass -- detail doodads are CPU-built geometry (WorldClient/DetailDoodad.cpp, buffers tagged
+// client ships exactly five vertex shaders (patter, rain, sand, snowpoint, Model2), and none of them is
+// grass. Detail doodads are CPU-built geometry (WorldClient/DetailDoodad.cpp, buffers tagged
 // "CDetailDoodad_vtx" / "CDetailDoodad_idx") pushed down a fixed-function path. There is no shader to
 // patch, so comfygrass supplies one of its own.
 //
-// This client's WoW.exe renders through Direct3D 9 (it imports d3d9.dll and calls Direct3DCreate9; no
-// d3d8 is loaded at all), and d3d9.dll here is DXVK. So comfygrass installs as a d3d9.dll proxy in front
-// of DXVK: chainload the real one, patch a handful of IDirect3DDevice9 vtable slots IN PLACE, and act
-// on the draw calls that match the configured grass signature. In place matters -- handing back a
-// private vtable copy drops the RTTI word DXVK keeps behind vtable[0], and the client silently gives up
-// before CreateDevice.
+// This client's WoW.exe renders through Direct3D 9, and d3d9.dll here is DXVK. WoW.exe loads d3d9.dll at
+// run time and does not import it, so there is nothing to intercept. VanillaFixes loads comfygrass from
+// dlls.txt. comfygrass creates a throwaway device of its own to find DXVK's shared IDirect3DDevice9
+// vtable (see AttachToDxvk), patches a few slots IN PLACE, and acts on the draw calls that match the
+// configured grass signature. In place matters: a private vtable copy drops the RTTI word DXVK keeps
+// behind vtable[0], and the client silently gives up before CreateDevice.
 //
 // For a matched draw, a vs_2_0 is bound and the GPU does the displacement, reading the client's own
 // vertex buffer. Nothing is read back and nothing is copied: that buffer is WRITEONLY and maps to
@@ -21,11 +21,11 @@
 // reproduce vertex work: transform, lighting, fog, texcoords.
 //
 // Two modes:
-//   probe  (F9)  -- dump one frame of draw calls with their signatures and a few vertices each, so the
-//                   grass draws can be identified by diffing captures at /console frilldensity 1 vs 256.
-//   effect (F10) -- reload comfygrass.ini and toggle the sway: two travelling sine waves, plus a parting
-//                   around the player read out of the client, both hinged on the blade's own texture v
-//                   so the roots stay planted.
+//   probe  (F9):  dump one frame of draw calls with their signatures and a few vertices each, so the
+//                 grass draws can be identified by diffing captures at /console frilldensity 1 vs 256.
+//   effect (F10): reload comfygrass.ini and toggle the sway: two travelling sine waves, plus a parting
+//                 around the player read out of the client, both hinged on the blade's own texture v
+//                 so the roots stay planted.
 
 #define CINTERFACE // gives the C-style IDirect3DDevice9Vtbl, so slots are patched by name, not by index
 #define WIN32_LEAN_AND_MEAN
@@ -1023,8 +1023,9 @@ VsOut main(VsIn i)
         //
         // Vertex positions are chunk-local and stable, so by default the phase and the per-blade jitter
         // come from those alone and nothing moves with the camera. The cost is that the wind pattern
-        // repeats per chunk instead of running continuously across the world; recovering true world
-        // coordinates needs the camera position read out of the client, which is a v2 job.
+        // repeats per chunk instead of running continuously across the world. True world coordinates
+        // are p + world translation + g_anchor.camera; the camera is already read for parting, but the
+        // phase does not use it yet.
         if (g_cfg.worldPhase)
         {
             c[8][0] = g_state.world.m[3][0];
