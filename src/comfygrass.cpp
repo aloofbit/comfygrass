@@ -153,6 +153,14 @@ namespace
     // vertex pipeline is doing for these draws, so the probe reports the states that affect it.
     std::map<DWORD, DWORD> g_rs;
 
+    // The client's values in the vertex shader constants that the wind shader overwrites. The client
+    // uploads a constant only when its own copy changes, so it does not write them again after a grass
+    // draw. Rain (rain.bls) then drew with the grass matrices, and the rain did not show.
+    const UINT kWindConsts = 21;
+    float g_vsConst[kWindConsts][4] = {};
+    bool  g_vsConstSeeded = false;   // g_vsConst holds the device values, read once before the first overwrite
+    bool  g_vsConstDirty  = false;   // the device holds the wind shader's values, not the client's
+
     bool g_probeArmed    = false; // capture the next frame
     bool g_probing       = false; // capturing right now
     bool g_effectOn      = false;
@@ -301,6 +309,9 @@ namespace
 
         if (m.fvf != 0xFFFFFFFF && g_state.fvf != m.fvf)        return false;
 
+        // Grass is fixed function. A draw with a vertex shader of the client's own is not grass.
+        if (g_state.vshader)                                    return false;
+
         // Grass is batched per map chunk, so its world matrix is a pure translation. Doodad instances
         // (trees, bushes) share the vertex format but carry a real rotation. Without this test, the wind
         // bent trees too.
@@ -428,6 +439,7 @@ namespace
     using SetFVFFn       = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*, DWORD);
     using SetRSFn        = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*, D3DRENDERSTATETYPE, DWORD);
     using SetVSFn        = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*, IDirect3DVertexShader9*);
+    using SetVSConstFFn  = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*, UINT, const float*, UINT);
     using SetDeclFn      = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*, IDirect3DVertexDeclaration9*);
     using SetStreamFn    = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*, UINT, IDirect3DVertexBuffer9*, UINT, UINT);
     using DrawPrimFn     = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, UINT);
@@ -441,6 +453,7 @@ namespace
     SetFVFFn       g_oSetFVF       = nullptr;
     SetRSFn        g_oSetRS        = nullptr;
     SetVSFn        g_oSetVS        = nullptr;
+    SetVSConstFFn  g_oSetVSConstF  = nullptr;
     SetDeclFn      g_oSetDecl      = nullptr;
     SetStreamFn    g_oSetStream    = nullptr;
     DrawPrimFn     g_oDrawPrim     = nullptr;
@@ -1322,7 +1335,7 @@ VsOut main(VsIn i)
 
         // Upload the transpose, so each register holds a column and o.pos = dot(v, c[n]) is the
         // row-vector multiply D3D9 uses.
-        float c[21][4] = {};
+        float c[kWindConsts][4] = {};
         for (int r = 0; r < 4; ++r)
             for (int k = 0; k < 4; ++k)
                 c[r][k] = wvp.m[k][r];
@@ -1499,7 +1512,15 @@ VsOut main(VsIn i)
         g_state.lastGrassWorld[2] = g_state.world.m[3][2];
         g_state.lastGrassValid    = true;
 
-        if (FAILED(dev->lpVtbl->SetVertexShaderConstantF(dev, 0, &c[0][0], 21)))
+        if (!g_vsConstSeeded)
+        {
+            g_vsConstSeeded = true;
+            if (FAILED(dev->lpVtbl->GetVertexShaderConstantF(dev, 0, &g_vsConst[0][0], kWindConsts)))
+                Log("vertex shader constants: read failed, restored from the client's later writes only");
+        }
+        // Past the hook, so the shadow keeps the client's values.
+        g_vsConstDirty = true;
+        if (FAILED(g_oSetVSConstF(dev, 0, &c[0][0], kWindConsts)))
             return false;
         if (FAILED(dev->lpVtbl->SetVertexShader(dev, g_windVS)))
             return false;
@@ -1615,6 +1636,8 @@ VsOut main(VsIn i)
         g_layouts.clear();
         g_state.vb     = nullptr;
         g_state.stride = 0;
+        g_vsConstSeeded = false;   // a reset returns the constants to their defaults
+        g_vsConstDirty  = false;
         return g_oReset(dev, pp);
     }
 
@@ -1647,6 +1670,25 @@ VsOut main(VsIn i)
     {
         g_state.fvf = fvf;
         return g_oSetFVF(dev, fvf);
+    }
+
+    HRESULT STDMETHODCALLTYPE hkSetVertexShaderConstantF(IDirect3DDevice9* dev, UINT start,
+                                                         const float* data, UINT count)
+    {
+        if (data)
+            for (UINT r = start; r < start + count && r < kWindConsts; ++r)
+                memcpy(g_vsConst[r], data + (r - start) * 4, sizeof(g_vsConst[r]));
+        return g_oSetVSConstF(dev, start, data, count);
+    }
+
+    // Before a draw with the client's own vertex shader, give back the constants a grass draw overwrote.
+    // A fixed-function draw does not read them, so one restore serves many grass draws.
+    void RestoreClientConstants(IDirect3DDevice9* dev)
+    {
+        if (!g_vsConstDirty || !g_state.vshader)
+            return;
+        g_vsConstDirty = false;
+        g_oSetVSConstF(dev, 0, &g_vsConst[0][0], kWindConsts);
     }
 
     HRESULT STDMETHODCALLTYPE hkSetVertexShader(IDirect3DDevice9* dev, IDirect3DVertexShader9* sh)
@@ -1683,6 +1725,7 @@ VsOut main(VsIn i)
         if (g_effectOn && g_cfg.effectEnabled && Matches(prim, numVertices) &&
             DrawWithWindShader(dev, false, prim, 0, 0, numVertices, 0, primCount, startVertex))
             return S_OK;
+        RestoreClientConstants(dev);
         return g_oDrawPrim(dev, prim, startVertex, primCount);
     }
 
@@ -1699,6 +1742,7 @@ VsOut main(VsIn i)
             DrawWithWindShader(dev, true, prim, baseVertexIndex, minVertexIndex, numVertices,
                                startIndex, primCount, 0))
             return S_OK;
+        RestoreClientConstants(dev);
         return g_oDrawIdxPrim(dev, prim, baseVertexIndex, minVertexIndex, numVertices, startIndex, primCount);
     }
 
@@ -1720,6 +1764,7 @@ VsOut main(VsIn i)
             HookSlot(reinterpret_cast<void**>(&v->SetFVF),               &hkSetFVF,               reinterpret_cast<void**>(&g_oSetFVF))       &&
             HookSlot(reinterpret_cast<void**>(&v->SetRenderState),       &hkSetRenderState,       reinterpret_cast<void**>(&g_oSetRS))        &&
             HookSlot(reinterpret_cast<void**>(&v->SetVertexShader),      &hkSetVertexShader,      reinterpret_cast<void**>(&g_oSetVS))        &&
+            HookSlot(reinterpret_cast<void**>(&v->SetVertexShaderConstantF), &hkSetVertexShaderConstantF, reinterpret_cast<void**>(&g_oSetVSConstF)) &&
             HookSlot(reinterpret_cast<void**>(&v->SetVertexDeclaration), &hkSetVertexDeclaration, reinterpret_cast<void**>(&g_oSetDecl))      &&
             HookSlot(reinterpret_cast<void**>(&v->SetStreamSource),      &hkSetStreamSource,      reinterpret_cast<void**>(&g_oSetStream))    &&
             HookSlot(reinterpret_cast<void**>(&v->DrawPrimitive),        &hkDrawPrimitive,        reinterpret_cast<void**>(&g_oDrawPrim))     &&
