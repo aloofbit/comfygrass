@@ -54,6 +54,17 @@ struct PhysicsSettings
     bool  reportAnchor = false;  // log the anchor and the chunk-grid check with the cost report
 };
 
+// The detail models the grass is made of. comfygrass patches the client's fill loop, at fillAddr, so
+// that each vertex carries its height up its own model, and a rigid model (a rock, a pebble, a bone)
+// carries 0. See "detail models" in comfygrass.cpp.
+struct ModelSettings
+{
+    bool  enabled         = true;
+    float rigidHeight     = 0.3f;        // a model whose top is lower than this, in yards, is rigid
+    char  rigidNames[128] = "Roc,Bon";   // a model whose file name contains one of these is rigid
+    DWORD fillAddr        = 0x006B26CD;  // the instruction that picks each instance's vertex colour
+};
+
 // Which draw calls to treat as grass. Filled in from a probe capture (F9); a field left at its
 // "unset" value is not tested, so the signature can be as loose or as tight as the capture warrants.
 struct MatchSettings
@@ -70,6 +81,7 @@ struct Settings
 {
     WindSettings    wind;
     PhysicsSettings physics;
+    ModelSettings   models;
     MatchSettings   match;
 
     bool  effectEnabled = false; // off until a signature is configured (see README)

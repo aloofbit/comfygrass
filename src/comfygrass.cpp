@@ -490,6 +490,8 @@ namespace
     // uv.y span per grass texture, measured once from a small sample.
     //
     // This read happens a few dozen times per session, not per frame, so it costs nothing (see VbRead).
+    // Only the fallback uses it: when the fill loop is patched, each vertex carries its own height
+    // (see "detail models").
     struct VSpan { float lo; float inv; };
     std::map<void*, VSpan> g_vspan;
 
@@ -817,6 +819,314 @@ namespace
             origin[0], origin[1], origin[2], residual[0], residual[1], kChunk);
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // detail models: a height for every vertex, and rigid models
+    //
+    // The shader needs to know how high up its blade each vertex is: the root must stay planted and
+    // the tip must move most. The draw call does not say. Two things are wrong with guessing it:
+    //
+    //   1. The texture v is a poor measure of height. It was the first signal (see README), but in
+    //      many models the top vertices sit in the middle of v: BadGra01's top vertices have v 0.52
+    //      in a span of 0.02 to 0.73, and got a weight of 0. So Badlands grass barely swayed and did
+    //      not part at all.
+    //   2. A ground layer's detail models include rocks, pebbles, shells and bones. The client draws
+    //      them in batches, one batch per texture, and a rock and a grass tuft often share one atlas
+    //      (BadRoc01 and BadGra02 both use 8des_detaildoodads01.blp). So nothing at the draw level can
+    //      keep the rocks still.
+    //
+    // The client knows both answers while it fills a batch, so comfygrass patches the fill loop at
+    // 0x006B2600 in two places:
+    //
+    //   006B2690  mov edx, [esi+4]            ; esi = the instance, [esi+4] = its model index
+    //   006B2693  mov eax, [0x00CAFFFC]       ; the table of CDetailDoodadData, one per model
+    //   006B2698  mov eax, [eax+edx*4]        ; CDetailDoodadData: +0 file name, +4 model handle
+    //   006B269E  call 0x00710E20             ; model handle -> M2 header
+    //   ...
+    //   006B26CD  mov ebx, [ebp+ebx*4-0x24]   ; pick the lit or the shadowed colour  <- patch 1
+    //   006B26D1  mov [ebp-0x18], ebx         ; the colour for every vertex of this instance
+    //   006B26D4  jmp 0x006B26E0              ; into the per-vertex loop
+    //   ...                                   ; ecx = the model vertex, edi = the next output vertex
+    //   006B2743  mov edx, [ebp-0x18]         ;                                      <- patch 2
+    //   006B2746  mov [edi-0xC], edx          ; write the colour
+    //   006B2749  mov eax, [ecx+0x20]         ; the uv follows
+    //
+    // Patch 1 runs once per instance. At that point eax holds the M2 header: +0x44 vertex count, +0x48
+    // vertices (0x30 bytes each, z at +8), +0x50 the first view (+0 index count, +4 the u16 indices).
+    // It finds the model's top and decides whether the model is rigid, cached per model.
+    //
+    // Patch 2 runs once per vertex. It divides the model vertex's own z by the top of the model, which
+    // gives 0 at the ground and 1 at the top, and stores it in 6 bits: the lowest 2 bits of red, of
+    // green and of blue. A rigid model stores 0 everywhere. The alpha's lowest bit is cleared as the
+    // sign that the colour carries a height. The client writes only two colours, 0xFFFFFFFF and
+    // 0xFFC0C0C0 (in shadow), so the shader can put the exact colour back. The fixed-function path,
+    // which draws the grass when the effect is off, sees each channel off by at most 3/255.
+    //
+    // A model is rigid if its top is lower than rigidHeight, or if its file name contains a word from
+    // rigidNames. Measured over all 447 detail models in GroundEffectDoodad.dbc, every rock is lower
+    // than 0.28 yards, and every model lower than 0.3 yards is a rock, a pebble, a shell, a low tuft or
+    // a small mushroom. Grass starts at 0.31 yards. The bones in Deadwind Pass and the Eastern
+    // Plaguelands are up to 0.93 yards tall, so the name catches those.
+    //
+    // Before it patches, comfygrass compares the whole loop, 0xE7 bytes from 0x006B2690, with the bytes
+    // it expects. A different WoW.exe fails the check. Then nothing is patched, and the shader falls
+    // back to the texture v, as before.
+
+    constexpr DWORD   kFillBlockBack = 0x3D;         // the check starts at 0x006B2690
+    constexpr uint8_t kFillBlock[]   = {
+        0x8B, 0x56, 0x04, 0xA1, 0xFC, 0xFF, 0xCA, 0x00, 0x8B, 0x04, 0x90, 0x8B, 0x48, 0x04, 0xE8, 0x7D,
+        0xE7, 0x05, 0x00, 0x8B, 0x50, 0x50, 0x8B, 0x0A, 0x89, 0x4D, 0xF8, 0x8A, 0x0E, 0x33, 0xDB, 0xF6,
+        0xC1, 0x01, 0x89, 0x45, 0xEC, 0x89, 0x55, 0xF0, 0x74, 0x05, 0xBB, 0x01, 0x00, 0x00, 0x00, 0x33,
+        0xC9, 0x39, 0x4D, 0xF8, 0x89, 0x4D, 0xFC, 0x0F, 0x86, 0x9A, 0x00, 0x00, 0x00, 0x8B, 0x5C, 0x9D,
+        0xDC, 0x89, 0x5D, 0xE8, 0xEB, 0x0A, 0x8B, 0x55, 0xF0, 0x8B, 0x45, 0xEC, 0x8D, 0x64, 0x24, 0x00,
+        0x8B, 0x52, 0x04, 0x0F, 0xB7, 0x0C, 0x4A, 0x8B, 0x50, 0x48, 0x8D, 0x0C, 0x49, 0xC1, 0xE1, 0x04,
+        0x03, 0xCA, 0x8D, 0x46, 0x20, 0x8D, 0x57, 0x0C, 0xD9, 0x01, 0x83, 0xC7, 0x24, 0xD8, 0x4E, 0x18,
+        0xD9, 0x46, 0x14, 0xD8, 0x49, 0x04, 0xDE, 0xE9, 0xD8, 0x4E, 0x1C, 0xD8, 0x46, 0x08, 0xD9, 0x5F,
+        0xDC, 0xD9, 0x01, 0xD8, 0x4E, 0x14, 0xD9, 0x46, 0x18, 0xD8, 0x49, 0x04, 0xDE, 0xC1, 0xD8, 0x4E,
+        0x1C, 0xD8, 0x46, 0x0C, 0xD9, 0x5F, 0xE0, 0xD9, 0x41, 0x08, 0xD8, 0x4E, 0x1C, 0xD8, 0x46, 0x10,
+        0xD9, 0x5F, 0xE4, 0x8B, 0x18, 0x89, 0x1A, 0x8B, 0x58, 0x04, 0x89, 0x5A, 0x04, 0x8B, 0x40, 0x08,
+        0x89, 0x42, 0x08, 0x8B, 0x55, 0xE8, 0x89, 0x57, 0xF4, 0x8B, 0x41, 0x20, 0x89, 0x47, 0xF8, 0x8B,
+        0x49, 0x24, 0x8B, 0x45, 0xF8, 0x89, 0x4F, 0xFC, 0x8B, 0x4D, 0xFC, 0x41, 0x3B, 0xC8, 0x89, 0x4D,
+        0xFC, 0x0F, 0x82, 0x6F, 0xFF, 0xFF, 0xFF, 0x8B, 0x45, 0xF4, 0x83, 0xC6, 0x2C, 0x48, 0x89, 0x45,
+        0xF4, 0x0F, 0x85, 0x19, 0xFF, 0xFF, 0xFF,
+    };
+    constexpr DWORD kInstanceLen    = 7;     // patch 1 replaces two instructions, 7 bytes
+    constexpr DWORD kInstanceResume = 0x13;  // 0x006B26E0, where the jmp at 0x006B26D4 goes
+    constexpr DWORD kVertexAt       = 0x76;  // patch 2, 0x006B2743
+    constexpr DWORD kVertexLen      = 6;     // two instructions, 6 bytes
+    constexpr int   kHeightSteps    = 63;    // 6 bits
+
+    DWORD g_instanceResume = 0;    // absolute addresses the stubs return to
+    DWORD g_vertexResume   = 0;
+    DWORD g_modelTable     = 0;    // 0x00CAFFFC, read out of the checked code, not assumed
+    bool  g_fillTried      = false; // one attempt: the check fails the same way every time
+    bool  g_fillPatched    = false;
+
+    // Written by patch 1 for the instance, read by patch 2 for each of its vertices.
+    DWORD g_encode      = 0;       // 1: store the height in the colour
+    float g_heightScale = 0.0f;    // kHeightSteps / top of the model, or 0 for a rigid model
+    DWORD g_heightTmp   = 0;
+
+    // Classification is cached per model. The key holds both the M2 header and the CDetailDoodadData,
+    // so a model freed and replaced at the same address is not taken for the old one.
+    struct ModelEntry { const void* model; const void* data; float scale; };
+    ModelEntry g_modelCache[64];
+    int        g_modelCount = 0;
+
+    void ClearModelCache() { g_modelCount = 0; }
+
+    // The CDetailDoodadData of an instance. The client read this same slot a moment before the patch
+    // site, so the read cannot fault.
+    const void* DetailData(const uint8_t* inst)
+    {
+        const uint8_t* const* table =
+            *reinterpret_cast<const uint8_t* const* const*>(static_cast<uintptr_t>(g_modelTable));
+        return table[*reinterpret_cast<const DWORD*>(inst + 4)];
+    }
+
+    // Reads the model's top and file name. Guarded, and with no C++ objects so that __try is allowed.
+    bool ReadDetailModel(const uint8_t* model, const void* data, float* topOut,
+                         char* nameOut, size_t nameCount)
+    {
+        __try
+        {
+            const DWORD     nVerts = *reinterpret_cast<const DWORD*>(model + 0x44);
+            const uint8_t*  verts  = *reinterpret_cast<const uint8_t* const*>(model + 0x48);
+            const uint8_t*  view   = *reinterpret_cast<const uint8_t* const*>(model + 0x50);
+            const DWORD     nIdx   = *reinterpret_cast<const DWORD*>(view);
+            const uint16_t* idx    = *reinterpret_cast<const uint16_t* const*>(view + 4);
+
+            float top = -3.4e38f;
+            for (DWORD k = 0; k < nIdx; ++k)
+            {
+                const DWORD i = idx[k];
+                if (i >= nVerts)
+                    continue;
+                const float z = *reinterpret_cast<const float*>(verts + i * 0x30 + 8);
+                if (z > top)
+                    top = z;
+            }
+
+            const char* name = *reinterpret_cast<const char* const*>(data);
+            *topOut = top;
+            strncpy_s(nameOut, nameCount, name ? name : "", _TRUNCATE);
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    // Case-insensitive: is one of the comma-separated words in list part of name?
+    bool NameMatches(const char* name, const char* list)
+    {
+        char lower[128];
+        size_t n = 0;
+        for (; name[n] && n + 1 < sizeof(lower); ++n)
+            lower[n] = static_cast<char>(tolower(static_cast<unsigned char>(name[n])));
+        lower[n] = 0;
+
+        const char* p = list;
+        while (*p)
+        {
+            while (*p == ',' || *p == ' ' || *p == '\t')
+                ++p;
+            char   word[32];
+            size_t w = 0;
+            while (*p && *p != ',' && *p != ' ' && *p != '\t')
+            {
+                if (w + 1 < sizeof(word))
+                    word[w++] = static_cast<char>(tolower(static_cast<unsigned char>(*p)));
+                ++p;
+            }
+            word[w] = 0;
+            if (w && strstr(lower, word))
+                return true;
+        }
+        return false;
+    }
+
+    // Called by patch 1 once per instance, while the client fills a batch. Sets g_encode and
+    // g_heightScale for the instance's vertices.
+    void __cdecl InstanceSetup(const uint8_t* model, const uint8_t* inst)
+    {
+        g_encode = 0;
+        if (!g_cfg.models.enabled)
+            return;
+
+        const void* data = DetailData(inst);
+        for (int k = 0; k < g_modelCount; ++k)
+            if (g_modelCache[k].model == model && g_modelCache[k].data == data)
+            {
+                g_heightScale = g_modelCache[k].scale;
+                g_encode      = 1;
+                return;
+            }
+
+        float top = 0.0f;
+        char  name[64];
+        if (!ReadDetailModel(model, data, &top, name, sizeof(name)))
+            return;
+
+        const bool low   = top < g_cfg.models.rigidHeight;
+        const bool named = NameMatches(name, g_cfg.models.rigidNames);
+        const bool flat  = top < 0.01f;   // nothing to divide by
+        const float scale = (low || named || flat) ? 0.0f : kHeightSteps / top;
+        Log("detail model %s: top %.2f yards, %s", name, top,
+            scale == 0.0f ? (named ? "rigid (name)" : "rigid (low)") : "moves");
+
+        if (g_modelCount == static_cast<int>(sizeof(g_modelCache) / sizeof(g_modelCache[0])))
+            g_modelCount = 0;   // more models than slots: start again, do not grow
+        g_modelCache[g_modelCount++] = { model, data, scale };
+        g_heightScale = scale;
+        g_encode      = 1;
+    }
+
+    // Patch 1. Registers on entry: eax = M2 header, esi = instance, ebx = 0 or 1 (in shadow).
+    __declspec(naked) void InstanceStub()
+    {
+        __asm
+        {
+            pushad
+            push esi
+            push eax
+            call InstanceSetup
+            add  esp, 8
+            popad
+            mov  ebx, [ebp + ebx * 4 - 0x24]
+            mov  [ebp - 0x18], ebx
+            jmp  dword ptr [g_instanceResume]
+        }
+    }
+
+    // Patch 2. Registers on entry: ecx = model vertex, edi = the output vertex + 0x24. eax, ebx and
+    // edx are free here: the client reloads all three before it reads them again. The x87 stack is
+    // empty, and fld/fistp leave it that way.
+    __declspec(naked) void VertexStub()
+    {
+        __asm
+        {
+            mov  edx, [ebp - 0x18]
+            cmp  dword ptr [g_encode], 0
+            je   store
+
+            fld   dword ptr [ecx + 8]
+            fmul  dword ptr [g_heightScale]
+            fistp dword ptr [g_heightTmp]
+            mov   eax, [g_heightTmp]
+            test  eax, eax
+            jge   notBelow
+            xor   eax, eax            // below the ground, or out of range
+        notBelow:
+            cmp   eax, 63
+            jle   inRange
+            mov   eax, 63
+        inRange:
+            and  edx, 0xFEFCFCFC      // alpha 0xFE marks a height; clear 2 bits of r, g and b
+            mov  ebx, eax
+            and  ebx, 3
+            shl  ebx, 16
+            or   edx, ebx             // red:   bits 0-1 of the height
+            mov  ebx, eax
+            shr  ebx, 2
+            and  ebx, 3
+            shl  ebx, 8
+            or   edx, ebx             // green: bits 2-3
+            shr  eax, 4
+            or   edx, eax             // blue:  bits 4-5
+        store:
+            mov  [edi - 0x0C], edx
+            jmp  dword ptr [g_vertexResume]
+        }
+    }
+
+    bool WriteJump(uintptr_t at, const void* to, DWORD len)
+    {
+        uint8_t code[8] = { 0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90 };
+        const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(to) - (at + 5));
+        memcpy(code + 1, &rel, sizeof(rel));
+
+        DWORD prot = 0;
+        if (!VirtualProtect(reinterpret_cast<void*>(at), len, PAGE_EXECUTE_READWRITE, &prot))
+            return false;
+        memcpy(reinterpret_cast<void*>(at), code, len);
+        VirtualProtect(reinterpret_cast<void*>(at), len, prot, &prot);
+        FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(at), len);
+        return true;
+    }
+
+    // Runs on the render thread, from Present, so the fill loop cannot run while the bytes change.
+    void InstallFillPatch()
+    {
+        g_fillTried = true;
+
+        const intptr_t  slide = reinterpret_cast<intptr_t>(GetModuleHandleW(nullptr)) - 0x00400000;
+        const uintptr_t site  = static_cast<uintptr_t>(static_cast<intptr_t>(g_cfg.models.fillAddr) + slide);
+        uint8_t have[sizeof(kFillBlock)] = {};
+        if (!g_cfg.models.fillAddr || !SafeCopy(site - kFillBlockBack, have, sizeof(have)) ||
+            memcmp(have, kFillBlock, sizeof(have)) != 0)
+        {
+            Log("detail models: the code at 0x%08X is not the expected fill loop. Nothing is patched: "
+                "rocks move, and the bend weight comes from the texture.", g_cfg.models.fillAddr);
+            return;
+        }
+        memcpy(&g_modelTable, have + 4, sizeof(g_modelTable));
+        g_instanceResume = static_cast<DWORD>(site + kInstanceResume);
+        g_vertexResume   = static_cast<DWORD>(site + kVertexAt + kVertexLen);
+
+        // Patch 2 first: until patch 1 is in, g_encode stays 0 and patch 2 writes the colour unchanged.
+        if (!WriteJump(site + kVertexAt, &VertexStub, kVertexLen) ||
+            !WriteJump(site, &InstanceStub, kInstanceLen))
+        {
+            Log("detail models: VirtualProtect failed (%lu)", GetLastError());
+            return;
+        }
+
+        g_fillPatched = true;
+        Log("detail models: fill loop patched at 0x%08X and 0x%08X (model table 0x%08X)",
+            static_cast<DWORD>(site), static_cast<DWORD>(site + kVertexAt), g_modelTable);
+    }
+
     const char* kWindHlsl = R"HLSL(
 struct VsIn  { float3 pos : POSITION; float3 nrm : NORMAL; float4 col : COLOR0; float2 uv : TEXCOORD0; };
 struct VsOut { float4 pos : POSITION; float4 col : COLOR0; float2 uv : TEXCOORD0; float fog : FOG; };
@@ -848,14 +1158,27 @@ VsOut main(VsIn i)
     VsOut o;
     float3 p = i.pos;
 
-    // uv.y runs from the tip to the base, but only across a slice of the atlas: one blade might span
-    // 0.00 to 0.09, not 0 to 1. Normalising against that measured span makes the blade hinge at the root
-    // instead of swaying bodily. anchor then holds the lowest part still, and squaring gives a
-    // stiff base with a loose tip.
+    // A vertex with alpha 0xFE carries its height up the model in the lowest 2 bits of r, g and b
+    // (see "detail models"): 0 at the ground, 63 at the top, 0 everywhere on a rigid model. The client
+    // writes only 0xFF and 0xC0 in those channels, so the exact colour comes back: clear the bits,
+    // then 0xFC can only have been 0xFF.
+    float4 c255   = floor(i.col * 255.0 + 0.5);
+    float  marked = step(c255.a, 254.5);
+    float3 bits   = c255.rgb - 4.0 * floor(c255.rgb * 0.25);
+    float  height = dot(bits, float3(1.0, 4.0, 16.0)) * (1.0 / 63.0);
+    float3 plain  = c255.rgb - bits;
+    plain += 3.0 * step(251.5, plain);
+    float4 col    = lerp(i.col, float4(plain * (1.0 / 255.0), 1.0), marked);
+
+    // The bend weight. Squaring the height gives a stiff base with a loose tip.
+    //
+    // The fallback, for a vertex without a height: uv.y runs from the tip to the base, but only across
+    // a slice of the atlas, so it is normalised against the span measured for the texture. anchor then
+    // holds the lowest part still, because the quads are sunk into the terrain.
     float base = saturate((i.uv.y - gVS.x) * gVS.y);
     float tip  = 1.0 - base;
-    float w   = saturate((tip - gSh.x) * gSh.y);
-    w = w * w;
+    float wuv  = saturate((tip - gSh.x) * gSh.y);
+    float w    = lerp(wuv * wuv, height * height, marked);
 
     // Phase comes from the chunk-local position plus gWT, which is zero unless worldPhase is on (see
     // DrawWithWindShader). Chunk-local positions do not move with the camera, so the pattern stays put.
@@ -895,11 +1218,11 @@ VsOut main(VsIn i)
     // came out visibly darker than stock.
     float3 N   = normalize(i.nrm);
     float  ndl = saturate(dot(N, -gLD.xyz)) * gLD.w;
-    float4 ambM = lerp(gMA, i.col, gMS.x);
-    float4 difM = lerp(gMD, i.col, gMS.y);
-    float4 emiM = lerp(gME, i.col, gMS.z);
+    float4 ambM = lerp(gMA, col, gMS.x);
+    float4 difM = lerp(gMD, col, gMS.y);
+    float4 emiM = lerp(gME, col, gMS.z);
     float3 lit  = saturate(emiM.rgb + ambM.rgb * gAm.rgb + difM.rgb * gLC.rgb * ndl);
-    o.col = lerp(i.col, float4(lit, difM.a), gMS.w);
+    o.col = lerp(col, float4(lit, difM.a), gMS.w);
 
     o.uv  = i.uv;
     o.fog = lerp(1.0, saturate((gFg.y - o.pos.w) * gFg.z), gFg.w);
@@ -1115,8 +1438,9 @@ VsOut main(VsIn i)
                 mat.Emissive.r, mat.Emissive.g, mat.Emissive.b);
         }
 
-        // Blade uv.y span for this grass texture, sampled once.
+        // Blade uv.y span for this grass texture, sampled once. Not needed when the fill loop is patched.
         VSpan uvSpan{ 0.0f, 1.0f };
+        if (!g_fillPatched)
         {
             auto it = g_vspan.find(g_state.texture0);
             if (it == g_vspan.end())
@@ -1239,6 +1563,7 @@ VsOut main(VsIn i)
         if (tog && !g_toggleKeyDown)
         {
             LoadSettings(g_iniPath);   // reload so tuning does not need a restart
+            ClearModelCache();         // [models] may have changed
             g_effectOn = !g_effectOn;
             Log("--- effect %s (settings reloaded) ---", g_effectOn ? "ON" : "OFF");
         }
@@ -1254,6 +1579,8 @@ VsOut main(VsIn i)
             g_probing = false;
         }
         PollKeys();
+        if (g_cfg.models.enabled && !g_fillTried)
+            InstallFillPatch();
 
         g_state.frame++;
         g_state.drawIndex = 0;

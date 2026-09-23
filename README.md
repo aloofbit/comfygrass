@@ -73,7 +73,7 @@ Change the values in this sequence:
 | `wavelength` | The length of the waves. A small value makes small areas of movement. A large value makes large waves |
 | `radius` | The distance around your character where the grass moves away, in yards |
 | `forceCenter` | The quantity of movement at the position of your character |
-| `anchor` | The part of each blade that does not move. Increase this value if the bottom of the grass moves |
+| `anchor` | The part of each blade that does not move. Increase this value if the bottom of the grass moves. This value has no effect while `[models]` is on |
 
 ## Grass density
 
@@ -93,6 +93,7 @@ The standard video controls do not change the density of the grass. The **Enviro
 ## Notes
 
 - comfygrass moves only the grass. Trees and other objects use the same vertex format. comfygrass uses the world matrix to find the difference. It does not move these objects.
+- Rocks, pebbles, shells and bones on the ground do not move. The client draws them in the same draw calls as the grass. comfygrass changes two instructions in the memory of the running client. Each grass vertex then carries its height, and each rock vertex carries 0. It does not change the `WoW.exe` file. The `[models]` section of `comfygrass.ini` controls which models do not move.
 - The addresses in `comfygrass.ini` are correct for one `WoW.exe` file only. comfygrass reads the camera position and the character position from the memory of the client. A different client has different addresses. comfygrass examines each value before it uses the value. If a value is not correct, comfygrass does nothing.
 - comfygrass does not send data on a network. It does not change the game files.
 - Ask the operator of your server if you can use this modification. comfygrass is the same type of modification as nampower or UnitXP.
