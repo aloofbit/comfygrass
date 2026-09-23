@@ -50,16 +50,44 @@ Vertex layout: `POSITION f3 @0, NORMAL f3 @12, COLOR @24, TEXCOORD0 f2 @28`.
 
 ### The bend weight
 
-`uv.y` runs from tip to base (the signal wxl uses), **but only across a slice of the atlas**. The span differs per grass texture:
+**Each vertex carries its height up its own model.** comfygrass patches the client's fill loop to put it there (see "Detail models" below). The shader squares it, so the root stays planted and the tip moves most. This replaced the texture signal below, which is now the fallback for a `WoW.exe` that fails the patch check.
+
+**The fallback.** `uv.y` runs from tip to base (the signal wxl uses), **but only across a slice of the atlas**. The span differs per grass texture:
 
 ```
 0.0000 .. 1.0000    0.0000 .. 0.5000    0.1057 .. 0.3961
 0.0007 .. 0.2456    0.3929 .. 1.0000    0.0005 .. 0.3836
 ```
 
-So a bare `1 - uv.y` gives ~0.9 at the base instead of 0, and blades slide instead of hinging. comfygrass measures each grass texture's span once from a small sample. The shader normalises `uv.y` with it, then applies `saturate((tip - anchor)/(1 - anchor))²`.
+So a bare `1 - uv.y` gives ~0.9 at the base instead of 0, and blades slide instead of hinging. comfygrass measures each grass texture's span once from a small sample. The shader normalises `uv.y` with it, then applies `saturate((tip - anchor)/(1 - anchor))²`. `anchor` defaults to **0.70** because grass quads are **sunk into the terrain**. The visible root is well above the quad's base, so the ramp must start higher than expected.
 
-`anchor` defaults to **0.70** because grass quads are **sunk into the terrain**. The visible root is well above the quad's base, so the ramp must start higher than expected.
+The fallback is poor for many models. `uv.y` follows where the art sits in the atlas, not the height. The top vertices of `BadGra01` have `uv.y` 0.52, in a span of 0.02 to 0.73, so they got a weight of 0. Even Elwynn's `ElwGra02` got almost none. In Badlands the grass swayed a little and did not part at all.
+
+### Detail models
+
+A ground layer's detail models are not only grass. `GroundEffectDoodad.dbc` lists rocks, pebbles, shells and bones too: the Badlands layers use `BadRoc01`-`03` next to `BadGra01`-`02`. Before this step, rocks bent in the wind and parted around the player.
+
+The draw-level test cannot separate them. The client draws one batch per texture, and a rock and a grass tuft often share an atlas: `BadRoc01` and `BadGra02` both use `8des_detaildoodads01.blp`. The vertex does not help either. The fill loop at `0x006B2600` writes the **instance's** normal to every vertex of the instance, not the model's normal, and a colour that is `0xFFFFFFFF`, or `0xFFC0C0C0` in shadow.
+
+The fill loop has both answers, so comfygrass patches it in two places:
+
+| Address | Runs | What the stub does |
+| --- | --- | --- |
+| `0x006B26CD` | once per instance, where the client picks its colour | finds the model's top and file name, decides if the model is rigid (cached per model) |
+| `0x006B2743` | once per vertex, where the client writes the colour | divides the model vertex's z by the top: 0 at the ground, 63 at the top, 0 on a rigid model |
+
+The height goes in the lowest 2 bits of red, green and blue, 6 bits in all, and the lowest alpha bit is cleared to say it is there. The client writes only `0xFF` and `0xC0` in those channels, so the shader recovers the exact colour: it clears the bits, and `0xFC` can only have been `0xFF`. The fixed-function path, which draws the grass when the effect is off, sees each channel off by at most 3/255.
+
+A model is rigid if its top is lower than `rigidHeight` (0.3 yards), or if its file name contains a word from `rigidNames` (`Roc`, `Bon`). The split comes from all 447 models in the DBC:
+
+| Models | Top of the model, yards |
+| --- | --- |
+| Rocks | 0.03 to 0.28 |
+| Shells, pebbles, low tufts, small mushrooms | below 0.3 |
+| Grass, flowers, bushes | 0.31 and more |
+| Bones (Deadwind Pass, Eastern Plaguelands) | up to 0.93, so the name catches them |
+
+The patch is made from `Present` on the render thread, so the fill loop cannot run while the bytes change. Before it patches, comfygrass compares the whole loop (0xE7 bytes from `0x006B2690`) with the expected bytes, and reads the model table address (`0x00CAFFFC`) out of that code. A different `WoW.exe` fails the check: nothing is patched, rocks move, the fallback sets the bend, and the log says why. Each model's result is logged once, for example `detail model BadRoc01.mdl: top 0.05 yards, rigid (low)`.
 
 ## Building
 
@@ -72,7 +100,7 @@ cmake --build build --config Release
 
 `comfygrass.dll` is written to the project root, next to `comfygrass.ini`, so the two files a player needs are together. To install, copy them into the client and add one line to `dlls.txt`; see the README one level up.
 
-**F9** captures one frame of draw calls to `comfygrass.log`. **F10** reloads `comfygrass.ini` and toggles the effect; press it twice to reload and stay on. All tunables are live.
+**F9** captures one frame of draw calls to `comfygrass.log`. **F10** reloads `comfygrass.ini` and toggles the effect; press it twice to reload and stay on. All tunables are live, except `[models]`: it applies to grass that the client builds after the reload.
 
 ## What did not work, and why
 

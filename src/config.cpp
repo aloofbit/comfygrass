@@ -10,6 +10,7 @@ namespace
 {
     const wchar_t* kWind    = L"wind";
     const wchar_t* kPhysics = L"physics";
+    const wchar_t* kModels  = L"models";
     const wchar_t* kMatch   = L"match";
     const wchar_t* kGeneral = L"general";
 
@@ -40,6 +41,23 @@ namespace
         if (!buf[0])
             return dflt;
         return static_cast<DWORD>(wcstoul(buf, nullptr, 0));
+    }
+
+    // Reads an ASCII string. GetPrivateProfileString keeps an inline "; comment", so it is cut here,
+    // with the spaces before it.
+    void GetS(const wchar_t* sec, const wchar_t* key, char* out, size_t count, const wchar_t* ini)
+    {
+        wchar_t buf[256] = {};
+        GetPrivateProfileStringW(sec, key, L"\x1", buf, 256, ini);
+        if (buf[0] == L'\x1')
+            return;   // no such key: keep the default already in out
+        if (wchar_t* semi = wcschr(buf, L';'))
+            *semi = 0;
+        size_t n = wcslen(buf);
+        while (n && (buf[n - 1] == L' ' || buf[n - 1] == L'\t'))
+            buf[--n] = 0;
+        WideCharToMultiByte(CP_ACP, 0, buf, -1, out, static_cast<int>(count), nullptr, nullptr);
+        out[count - 1] = 0;
     }
 }
 
@@ -81,6 +99,11 @@ void LoadSettings(const wchar_t* ini)
     s.physics.posScanMax   = GetX(kPhysics, L"posScanMax",   s.physics.posScanMax,   ini);
     s.physics.posScanFrames = GetI(kPhysics, L"posScanFrames", s.physics.posScanFrames, ini);
     s.physics.reportAnchor = GetB(kPhysics, L"reportAnchor", s.physics.reportAnchor, ini);
+
+    s.models.enabled     = GetB(kModels, L"enabled",     s.models.enabled,     ini);
+    s.models.rigidHeight = GetF(kModels, L"rigidHeight", s.models.rigidHeight, ini);
+    s.models.fillAddr    = GetX(kModels, L"fillAddr",    s.models.fillAddr,    ini);
+    GetS(kModels, L"rigidNames", s.models.rigidNames, sizeof(s.models.rigidNames), ini);
 
     s.match.fvf      = GetX(kMatch, L"fvf",      s.match.fvf,      ini);
     s.match.stride   = GetX(kMatch, L"stride",   s.match.stride,   ini);
