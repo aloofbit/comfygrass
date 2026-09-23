@@ -42,6 +42,8 @@ It gets the vtable from a device of its own. Every `IDirect3DDevice9` from DXVK 
 
 For grass draws only, comfygrass binds a `vs_2_0`, and the GPU does the displacement. **The input is the client's own vertex buffer. Nothing is read back or copied.** D3D9 allows a programmable vertex shader with the fixed-function *pixel* pipeline, so only vertex work is reproduced: transform, lighting, fog, texcoords.
 
+**The wind shader gives back the constants it uses.** It writes vertex shader constants c0 to c20. The client uploads a constant only when its own copy changes, so it does not write these again after a grass draw. The rain shader `rain.bls` then drew with the grass values, and no rain showed. comfygrass keeps a copy of the client's values from `SetVertexShaderConstantF` and writes them back before the next draw that uses a client shader.
+
 ### Identifying grass
 
 `stride 36` + `vs = 0` + **identity world rotation**. Grass is batched per map chunk, so its world matrix is a pure translation. Tree and bush instances share the vertex format but have a real rotation. Without the rotation test, the wind bends trees too.
