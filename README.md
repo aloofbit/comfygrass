@@ -1,5 +1,9 @@
 # comfygrass
 
+**Bugs, questions and screenshots: [join our Discord](https://discord.gg/YSWzYk8xP).**
+
+[![Discord](https://img.shields.io/badge/Discord-ComfyCraft-5865F2?logo=discord&logoColor=white&style=for-the-badge)](https://discord.gg/YSWzYk8xP)
+
 comfygrass is a modification for the World of Warcraft 1.12 client. It makes the grass move in the wind. The grass also moves away from your character when you walk through it.
 
 ![The grass moves in the wind around a character in Elwynn Forest](media/preview.gif)
