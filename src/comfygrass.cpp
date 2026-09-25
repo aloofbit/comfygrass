@@ -1591,9 +1591,44 @@ VsOut main(VsIn i)
         g_toggleKeyDown = tog;
     }
 
+    // What a device owns, or what is keyed by its objects' addresses: dropped at a Reset, and when the
+    // client makes a new device.
+    void ForgetDevice()
+    {
+        ReleaseWindShader();    // device-owned objects do not survive a reset
+        g_vspan.clear();
+        g_layouts.clear();
+        g_state.vb     = nullptr;
+        g_state.stride = 0;
+        g_vsConstSeeded = false;   // a reset returns the constants to their defaults
+        g_vsConstDirty  = false;
+    }
+
+    // The client lets its device go and makes a new one for a resolution change or a Maximized toggle,
+    // with no Reset (measured in comfyatmosphere on 2026-09-25: a `device changed` line at each switch).
+    // The hooks sit in DXVK's shared vtable, so they carry on for the new device. Without this, the wind
+    // shader made on the old device was set on the new one at every grass draw, and the texture and
+    // declaration caches could match new objects at old addresses. In comfyatmosphere the same mistake drew
+    // the font texture over the whole screen and once stopped WoW with ERROR #124. The old wind shader
+    // keeps the old device alive until it is released here, so the new device cannot take its address.
+    IDirect3DDevice9* g_seenDev = nullptr;   // compared only; not referenced
+
+    void CheckDevice(IDirect3DDevice9* dev)
+    {
+        if (dev == g_seenDev)
+            return;
+        if (g_seenDev)
+        {
+            Log("device changed from %p to %p: the wind shader and the caches are dropped", g_seenDev, dev);
+            ForgetDevice();
+        }
+        g_seenDev = dev;
+    }
+
     HRESULT STDMETHODCALLTYPE hkPresent(IDirect3DDevice9* dev, const RECT* src, const RECT* dst,
                                         HWND wnd, const RGNDATA* dirty)
     {
+        CheckDevice(dev);
         if (g_probing)
         {
             Log("--- end frame %llu (%u draws) ---", g_state.frame, g_state.drawIndex);
@@ -1631,19 +1666,15 @@ VsOut main(VsIn i)
 
     HRESULT STDMETHODCALLTYPE hkReset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp)
     {
-        ReleaseWindShader();    // device-owned objects do not survive a reset
-        g_vspan.clear();
-        g_layouts.clear();
-        g_state.vb     = nullptr;
-        g_state.stride = 0;
-        g_vsConstSeeded = false;   // a reset returns the constants to their defaults
-        g_vsConstDirty  = false;
+        CheckDevice(dev);
+        ForgetDevice();
         return g_oReset(dev, pp);
     }
 
     HRESULT STDMETHODCALLTYPE hkSetTransform(IDirect3DDevice9* dev, D3DTRANSFORMSTATETYPE state,
                                              const D3DMATRIX* m)
     {
+        CheckDevice(dev);
         if (state == D3DTS_PROJECTION && m)
             g_state.proj = *m;
         if (state == D3DTS_WORLD && m)
@@ -1655,6 +1686,7 @@ VsOut main(VsIn i)
 
     HRESULT STDMETHODCALLTYPE hkSetTexture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseTexture9* tex)
     {
+        CheckDevice(dev);
         if (stage == 0)
             g_state.texture0 = tex;
         return g_oSetTexture(dev, stage, tex);
@@ -1662,12 +1694,14 @@ VsOut main(VsIn i)
 
     HRESULT STDMETHODCALLTYPE hkSetRenderState(IDirect3DDevice9* dev, D3DRENDERSTATETYPE st, DWORD value)
     {
+        CheckDevice(dev);
         g_rs[static_cast<DWORD>(st)] = value;
         return g_oSetRS(dev, st, value);
     }
 
     HRESULT STDMETHODCALLTYPE hkSetFVF(IDirect3DDevice9* dev, DWORD fvf)
     {
+        CheckDevice(dev);
         g_state.fvf = fvf;
         return g_oSetFVF(dev, fvf);
     }
@@ -1675,6 +1709,7 @@ VsOut main(VsIn i)
     HRESULT STDMETHODCALLTYPE hkSetVertexShaderConstantF(IDirect3DDevice9* dev, UINT start,
                                                          const float* data, UINT count)
     {
+        CheckDevice(dev);
         if (data)
             for (UINT r = start; r < start + count && r < kWindConsts; ++r)
                 memcpy(g_vsConst[r], data + (r - start) * 4, sizeof(g_vsConst[r]));
@@ -1693,12 +1728,14 @@ VsOut main(VsIn i)
 
     HRESULT STDMETHODCALLTYPE hkSetVertexShader(IDirect3DDevice9* dev, IDirect3DVertexShader9* sh)
     {
+        CheckDevice(dev);
         g_state.vshader = sh;
         return g_oSetVS(dev, sh);
     }
 
     HRESULT STDMETHODCALLTYPE hkSetVertexDeclaration(IDirect3DDevice9* dev, IDirect3DVertexDeclaration9* d)
     {
+        CheckDevice(dev);
         g_state.decl = d;
         return g_oSetDecl(dev, d);
     }
@@ -1706,6 +1743,7 @@ VsOut main(VsIn i)
     HRESULT STDMETHODCALLTYPE hkSetStreamSource(IDirect3DDevice9* dev, UINT stream,
                                                 IDirect3DVertexBuffer9* vb, UINT offset, UINT stride)
     {
+        CheckDevice(dev);
         if (stream == 0)
         {
             g_state.vb       = vb;
@@ -1718,6 +1756,7 @@ VsOut main(VsIn i)
     HRESULT STDMETHODCALLTYPE hkDrawPrimitive(IDirect3DDevice9* dev, D3DPRIMITIVETYPE prim,
                                               UINT startVertex, UINT primCount)
     {
+        CheckDevice(dev);
         const UINT numVertices = VertsForPrims(prim, primCount);
         if (g_probing)
             ProbeDraw("DrawPrimitive", prim, startVertex, numVertices, primCount);
@@ -1733,6 +1772,7 @@ VsOut main(VsIn i)
                                                      INT baseVertexIndex, UINT minVertexIndex,
                                                      UINT numVertices, UINT startIndex, UINT primCount)
     {
+        CheckDevice(dev);
         const INT first = baseVertexIndex + static_cast<INT>(minVertexIndex);
         if (g_probing)
             ProbeDraw("DrawIndexedPrim", prim, first < 0 ? 0u : static_cast<UINT>(first),
