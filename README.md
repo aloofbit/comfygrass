@@ -1,5 +1,11 @@
 # comfygrass
 
+> [!IMPORTANT]
+> **comfygrass is now part of [comfyatmosphere](https://github.com/aloofbit/comfyatmosphere).** Its `comfyfog.dll`
+> draws the moving grass, and the Atmosphere controls have a Grass tab. Use comfyatmosphere instead of this mod.
+> Remove the line `comfygrass.dll` from `dlls.txt`: while comfygrass is loaded, it draws the grass and the Grass
+> controls do nothing.
+
 **Bugs, questions and screenshots: [join our Discord](https://discord.gg/YSWzYk8xP).**
 
 [![Discord](https://img.shields.io/badge/Discord-ComfyCraft-5865F2?logo=discord&logoColor=white&style=for-the-badge)](https://discord.gg/YSWzYk8xP)
